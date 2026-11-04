@@ -54,6 +54,7 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            task_syscall_count: [0; 512]
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -135,6 +136,26 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Record the number of times a certain system call is made by the current 'Running' task
+    fn record_syscall(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        if syscall_id < inner.tasks[current].task_syscall_count.len() {
+            inner.tasks[current].task_syscall_count[syscall_id] += 1;
+        }
+    }
+
+    /// Get the number of times a certain system call
+    fn read_syscall_count(&self, syscall_id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        if syscall_id < inner.tasks[current].task_syscall_count.len() {
+            inner.tasks[current].task_syscall_count[syscall_id] as usize
+        } else {
+            0
+        }
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +189,14 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Record the number of times a certain system call is made by the current 'Running' task
+pub fn record_syscall(syscall_id: usize) {
+    TASK_MANAGER.record_syscall(syscall_id);
+}
+
+/// Get the number of times a certain system call
+pub fn read_syscall_count(syscall_id: usize) -> usize {
+    TASK_MANAGER.read_syscall_count(syscall_id)
 }
