@@ -38,6 +38,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     0
 }
 
+/// Get the system trace.
 pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     match trace_request {
         0 => {
