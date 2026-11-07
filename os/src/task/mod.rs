@@ -15,6 +15,7 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -126,6 +127,26 @@ impl TaskManager {
         inner.tasks[inner.current_task].get_trap_cx()
     }
 
+    /// Map a framed area for the current task
+    fn map_current_area(&self, start_va: VirtAddr, end_va: VirtAddr, perm: MapPermission) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+
+        inner.tasks[current]
+            .memory_set
+            .insert_framed_area(start_va, end_va, perm)
+    }
+
+    /// Unmap a framed area for the current task
+    fn unmap_current_area(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+
+        inner.tasks[current]
+            .memory_set
+            .unmap_range(start_va, end_va)
+    }
+
     /// Change the current 'Running' task's program break
     pub fn change_current_program_brk(&self, size: i32) -> Option<usize> {
         let mut inner = self.inner.exclusive_access();
@@ -151,6 +172,26 @@ impl TaskManager {
             // go back to user mode
         } else {
             panic!("All applications completed!");
+        }
+    }
+
+    /// Counting the various syscall for the task
+    fn record_syscall(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        if syscall_id < inner.tasks[current].task_syscall_cnt.len() {
+            inner.tasks[current].task_syscall_cnt[syscall_id] += 1
+        }
+    }
+
+    /// Read the count of various syscall for the task
+    fn get_syscall_count(&self, syscall_id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        if syscall_id < inner.tasks[current].task_syscall_cnt.len() {
+            inner.tasks[current].task_syscall_cnt[syscall_id] as usize
+        } else {
+            0
         }
     }
 }
@@ -201,4 +242,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Counting the various syscall for the task
+pub fn record_syscall(syscall_id: usize) {
+    TASK_MANAGER.record_syscall(syscall_id)
+}
+
+/// Read the count of various syscall for the task
+pub fn get_syscall_count(syscall_id: usize) -> usize {
+    TASK_MANAGER.get_syscall_count(syscall_id)
+}
+
+/// Map a framed area for the current task
+pub fn map_current_area(start_va: VirtAddr, end_va: VirtAddr, perm: MapPermission) {
+    TASK_MANAGER.map_current_area(start_va, end_va, perm)
+}
+
+/// Unmap a framed area for the current task
+pub fn unmap_current_area(start_va: VirtAddr, end_va: VirtAddr) -> bool {
+    TASK_MANAGER.unmap_current_area(start_va, end_va)
 }
