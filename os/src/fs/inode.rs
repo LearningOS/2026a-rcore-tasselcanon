@@ -8,8 +8,8 @@ use super::File;
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, sync::Arc};
 use bitflags::*;
 use easy_fs::{EasyFileSystem, Inode};
 use lazy_static::*;
@@ -31,6 +31,10 @@ pub struct OSInodeInner {
 impl OSInode {
     /// create a new inode in memory
     pub fn new(readable: bool, writable: bool, inode: Arc<Inode>) -> Self {
+        let mut inner = OPEN_INODE_COUNTS.exclusive_access();
+        let inode_id = inode.inode_id();
+        *inner.entry(inode_id).or_insert(0) += 1;
+        drop(inner);
         Self {
             readable,
             writable,
@@ -54,7 +58,22 @@ impl OSInode {
         v
     }
 }
-
+impl Drop for OSInode {
+    fn drop(&mut self) {
+        let inner = self.inner.exclusive_access();
+        let inode_id = inner.inode.inode_id();
+        drop(inner);
+        let mut inner = OPEN_INODE_COUNTS.exclusive_access();
+        let count = inner.get_mut(&inode_id).expect("open inode count missing");
+        assert!(*count > 0);
+        *count -= 1;
+        if *count == 0 {
+            inner.remove(&inode_id);
+        }
+        drop(inner);
+        try_reclaim_inode(inode_id);
+    }
+}
 lazy_static! {
     pub static ref ROOT_INODE: Arc<Inode> = {
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
@@ -62,6 +81,26 @@ lazy_static! {
     };
 }
 
+lazy_static! {
+    static ref OPEN_INODE_COUNTS: UPSafeCell<BTreeMap<u32, usize>> = {
+        let map = BTreeMap::new();
+        unsafe { UPSafeCell::new(map) }
+    };
+}
+
+/// Try to reclaim an unlinked inode and its blocks
+fn try_reclaim_inode(inode_id: u32) {
+    let count_links = count_links(inode_id);
+    let inner = OPEN_INODE_COUNTS.exclusive_access();
+    let open_count = match inner.get(&inode_id) {
+        Some(count) => *count,
+        None => 0,
+    };
+    drop(inner);
+    if open_count == 0 && count_links == 0 {
+        ROOT_INODE.reclaim_inode(inode_id)
+    }
+}
 /// List all apps in the root directory
 pub fn list_apps() {
     println!("/**** APPS ****");
@@ -100,7 +139,24 @@ impl OpenFlags {
         }
     }
 }
-
+/// Link 2 files
+pub fn link_file(old_name: &str, new_name: &str) -> bool {
+    ROOT_INODE.link(old_name, new_name)
+}
+/// Count directory entries referencing an inode.
+pub fn count_links(inode_id: u32) -> usize {
+    ROOT_INODE.count_links(inode_id)
+}
+/// Unlink file
+pub fn unlink_file(name: &str) -> bool {
+    match ROOT_INODE.unlink(name) {
+        Some(inode_id) => {
+            try_reclaim_inode(inode_id);
+            true
+        }
+        None => false,
+    }
+}
 /// Open a file
 pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     let (readable, writable) = flags.read_write();
@@ -155,5 +211,9 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn inode_id(&self) -> Option<u32> {
+        let inner = self.inner.exclusive_access();
+        Some(inner.inode.inode_id())
     }
 }

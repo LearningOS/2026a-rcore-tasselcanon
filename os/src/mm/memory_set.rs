@@ -96,6 +96,59 @@ impl MemorySet {
             PTEFlags::R | PTEFlags::X,
         );
     }
+    /// Unmap the range of map
+    pub fn unmap_range(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let request_start = start_va.floor();
+        let request_end = end_va.ceil();
+
+        for vpn in VPNRange::new(request_start, request_end) {
+            let mapped = self
+                .areas
+                .iter()
+                .filter(|&area| area.vpn_range.get_start() <= vpn && vpn < area.vpn_range.get_end())
+                .count()
+                == 1;
+            if !mapped {
+                return false;
+            }
+        }
+        let old_areas = core::mem::take(&mut self.areas);
+
+        for mut area in old_areas {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+
+            let cut_start = area_start.max(request_start);
+            let cut_end = area_end.min(request_end);
+
+            if cut_start >= cut_end {
+                self.areas.push(area);
+                continue;
+            } else {
+                for vpn in VPNRange::new(cut_start, cut_end) {
+                    area.unmap_one(&mut self.page_table, vpn);
+                }
+                let right_frames = area.data_frames.split_off(&cut_end);
+                if area_start < cut_start {
+                    self.areas.push(MapArea {
+                        vpn_range: VPNRange::new(area_start, cut_start),
+                        data_frames: area.data_frames,
+                        map_type: area.map_type,
+                        map_perm: area.map_perm,
+                    });
+                }
+                if cut_end < area_end {
+                    self.areas.push(MapArea {
+                        vpn_range: VPNRange::new(cut_end, area_end),
+                        data_frames: right_frames,
+                        map_type: area.map_type,
+                        map_perm: area.map_perm,
+                    });
+                }
+            }
+        }
+        true
+    }
     /// Without kernel stacks.
     pub fn new_kernel() -> Self {
         let mut memory_set = Self::new_bare();
