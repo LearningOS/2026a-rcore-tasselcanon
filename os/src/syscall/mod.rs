@@ -104,6 +104,7 @@ mod process;
 mod sync;
 mod thread;
 
+use alloc::vec::Vec;
 use fs::*;
 use process::*;
 use sync::*;
@@ -151,4 +152,41 @@ pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
         SYSCALL_KILL => sys_kill(args[0], args[1] as u32),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
+}
+
+/// 根据下标按需扩容。
+/// 此辅助函数由本人编写；二维扩容边界修正及复用参考 OpenAI Codex。
+pub trait ResizeOnDemandIndex<C> {
+    /// 接口
+    fn apply(self, container: &mut C);
+}
+impl<T: Default> ResizeOnDemandIndex<Vec<T>> for usize {
+    /// 一维 Vec
+    fn apply(self, container: &mut Vec<T>) {
+        let required_len = self.checked_add(1).expect("index overflow");
+
+        if container.len() < required_len {
+            container.resize_with(required_len, T::default);
+        }
+    }
+}
+impl<T: Default> ResizeOnDemandIndex<Vec<Vec<T>>> for (usize, usize) {
+    /// 二维 Vec
+    fn apply(self, container: &mut Vec<Vec<T>>) {
+        let (row, col) = self;
+
+        let required_rows = row.checked_add(1).expect("row overflow");
+        let required_cols = col.checked_add(1).expect("col overflow");
+
+        if container.len() < required_rows {
+            container.resize_with(required_rows, Vec::new);
+        }
+        if container[row].len() < required_cols {
+            container[row].resize_with(required_cols, T::default);
+        }
+    }
+}
+/// 统一的按需扩容接口
+pub fn resize_on_demand<T>(container: &mut T, index: impl ResizeOnDemandIndex<T>) {
+    index.apply(container);
 }

@@ -49,6 +49,16 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// enable deadlock detect
+    pub enable_deadlock_detect: bool,
+    /// lock list
+    pub locked_list: Vec<Option<usize>>,
+    /// waiting lock
+    pub waiting: Vec<Option<usize>>,
+    /// semaphore allocation recode
+    pub semaphore_allocation_list: Vec<Vec<usize>>,
+    /// semaphore wait recode
+    pub semaphore_wait_list: Vec<Option<usize>>,
 }
 
 impl ProcessControlBlockInner {
@@ -81,6 +91,83 @@ impl ProcessControlBlockInner {
     /// get a task with tid in this process
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
+    }
+    /// detect mutex cycle
+    /// 参考 OpenAI Codex 关于互斥锁等待关系追踪的讨论与示例。
+    pub fn has_mutex_cycle(&self, tid: usize, mutex_id: usize) -> bool {
+        let mut current_mutex = mutex_id;
+        for _ in 0..=self.waiting.len() {
+            match self.locked_list.get(current_mutex) {
+                Some(Some(the_tid)) => {
+                    if *the_tid == tid {
+                        return true;
+                    }
+                    match self.waiting.get(*the_tid) {
+                        Some(Some(the_mutex_id)) => {
+                            current_mutex = *the_mutex_id;
+                        }
+                        _ => return false,
+                    }
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+    /// detect semaphore deadlock
+    /// 参考 rCore-Tutorial-Guide CH8 的资源检测算法及 OpenAI Codex 的讨论与示例。
+    /// https://learningos.cn/rCore-Tutorial-Guide/chapter8/5exercise.html
+    pub fn has_semaphore_deadlock(&self) -> bool {
+        let mut work: Vec<usize> = Vec::new();
+        for semaphore in self.semaphore_list.iter() {
+            let mut count = 0;
+            if let Some(sem) = semaphore {
+                let sem_inner = sem.inner.exclusive_access();
+                if sem_inner.count > 0 {
+                    count = sem_inner.count as usize;
+                }
+            }
+            work.push(count);
+        }
+        let mut finish: Vec<bool> = Vec::new();
+        finish.resize(self.tasks.len(), false);
+        for (i, may_task) in self.tasks.iter().enumerate() {
+            if let Some(task) = may_task {
+                let task_inner = task.inner_exclusive_access();
+                let exit_code = task_inner.exit_code;
+                if exit_code.is_some() {
+                    finish[i] = true;
+                }
+            } else {
+                finish[i] = true;
+            }
+        }
+        loop {
+            let mut progressed = false;
+            for tid in 0..finish.len() {
+                if finish[tid] {
+                    continue;
+                }
+                if let Some(Some(sem_id)) = self.semaphore_wait_list.get(tid) {
+                    if work.get(*sem_id).copied().unwrap_or(0) < 1 {
+                        continue;
+                    }
+                }
+                if let Some(row) = self.semaphore_allocation_list.get(tid) {
+                    for (sem_id, count) in row.iter().enumerate() {
+                        if let Some(available) = work.get_mut(sem_id) {
+                            *available += *count;
+                        }
+                    }
+                }
+                finish[tid] = true;
+                progressed = true;
+            }
+            if !progressed {
+                break;
+            }
+        }
+        finish.iter().any(|fin| !*fin)
     }
 }
 
@@ -119,6 +206,11 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    enable_deadlock_detect: false,
+                    locked_list: Vec::new(),
+                    waiting: Vec::new(),
+                    semaphore_allocation_list: Vec::new(),
+                    semaphore_wait_list: Vec::new(),
                 })
             },
         });
@@ -245,6 +337,11 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    enable_deadlock_detect: false,
+                    locked_list: Vec::new(),
+                    waiting: Vec::new(),
+                    semaphore_allocation_list: Vec::new(),
+                    semaphore_wait_list: Vec::new(),
                 })
             },
         });
